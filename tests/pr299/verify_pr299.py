@@ -44,6 +44,133 @@ to the exact formulas in monocypher.c.  This script
 import os
 import random
 import sys
+import time
+import traceback
+
+# --------------------------------------------------------------------
+# Progress output: every step announces itself before it runs, so if
+# the script looks stuck the last line says what it is doing.  On a
+# terminal the running line is overwritten with the result; when piped
+# each step prints a start line and a result line.  NO_COLOR is honoured.
+# --------------------------------------------------------------------
+_T0 = time.monotonic()
+_TTY = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+_UTF = (sys.stdout.encoding or "").lower().replace("-", "") == "utf8"
+OK, KO, RUN, BAR = ("\u2713", "\u2717", "\u2026", "\u2501") if _UTF \
+                   else ("ok", "FAIL", "..", "=")
+_CURRENT = "startup"
+
+
+def _c(code, text):
+    return f"\033[{code}m{text}\033[0m" if _TTY else text
+
+
+def _fmt(dt):
+    if dt < 1:
+        return f"{dt * 1000:.0f} ms"
+    if dt < 60:
+        return f"{dt:.1f} s"
+    return f"{int(dt // 60)} min {dt % 60:.0f} s"
+
+
+def _out(text, end="\n"):
+    sys.stdout.write(text + end)
+    sys.stdout.flush()
+
+
+def _clear():
+    if _TTY:
+        _out("\r\033[K", end="")
+
+
+def section(title):
+    head = f"{BAR * 2} {title} "
+    _out("\n" + _c("1", head + BAR * max(0, 72 - len(head))))
+
+
+class step:
+    """with step("what"): ...   prints the step, then ok/FAIL and time."""
+    def __init__(self, label):
+        self.label = label
+
+    def __enter__(self):
+        global _CURRENT
+        _CURRENT = self.label
+        self.t = time.monotonic()
+        _out(f"  {_c('2', RUN)} {self.label}", end="" if _TTY else "\n")
+        return self
+
+    def __exit__(self, et, ev, tb):
+        dt = _fmt(time.monotonic() - self.t)
+        _clear()
+        mark = _c("32", OK) if et is None else _c("31", KO)
+        _out(f"  {mark} {self.label}  {_c('2', dt)}")
+        return False
+
+
+class progress:
+    """for x in progress("what", items): ...   or   pr = progress("what", n);
+    pr.tick() per item; pr.done() at the end."""
+    def __init__(self, label, items):
+        global _CURRENT
+        _CURRENT = label
+        self.label = label
+        self.items = range(items) if isinstance(items, int) else list(items)
+        self.n = len(self.items)
+        self.i = 0
+        self.t = time.monotonic()
+        self.last = 0.0
+        self._show(force=True)
+
+    def _show(self, force=False):
+        now = time.monotonic()
+        if _TTY:
+            if not force and now - self.last < 0.1:
+                return
+            self.last = now
+            w = 24
+            f = w * self.i // self.n if self.n else w
+            bar = "#" * f + "-" * (w - f)
+            _out(f"\r\033[K  {_c('2', RUN)} {self.label}  [{bar}] "
+                 f"{self.i}/{self.n}  {_c('2', _fmt(now - self.t))}", end="")
+        elif force or self.i % max(1, self.n // 10) == 0:
+            _out(f"  {RUN} {self.label}  {self.i}/{self.n}  {_fmt(now - self.t)}")
+
+    def tick(self, k=1):
+        self.i += k
+        self._show()
+
+    def done(self):
+        _clear()
+        _out(f"  {_c('32', OK)} {self.label}  {self.n}/{self.n}  "
+             f"{_c('2', _fmt(time.monotonic() - self.t))}")
+
+    def __iter__(self):
+        for x in self.items:
+            yield x
+            self.tick()
+        self.done()
+
+
+def _excepthook(et, ev, tb):
+    _clear()
+    if et is KeyboardInterrupt:
+        _out(f"\n{_c('31', 'interrupted')} during: {_CURRENT}")
+        os._exit(130)
+    if et is AssertionError:
+        fr = traceback.extract_tb(tb)[-1]
+        _out(f"\n{_c('1;31', 'FAILED')} during: {_CURRENT}\n"
+             f"  line {fr.lineno}: {fr.line}\n"
+             f"  {ev if str(ev) else '(no message)'}")
+        os._exit(1)
+    sys.__excepthook__(et, ev, tb)
+
+
+sys.excepthook = _excepthook
+
+section("Monocypher PR #299: independent verification")
+_out(f"  python {sys.version.split()[0]}, seed 299, "
+     f"{'terminal' if _TTY else 'piped'} output")
 
 random.seed(299)
 
@@ -78,14 +205,19 @@ def sqrt_mod_p(a):
 # BBJLP 2008 Sec. 6: the formulas are complete if a is a square and d
 # is not.  BL 2007 Thm 3.3 (the actual proof): d non-square implies
 # d x1 x2 y1 y2 != +-1 for any two points on the curve.
-assert p % 4 == 1, "p = 1 mod 4 so -1 is a square"
-assert legendre(p - 1) == 1, "a = -1 is a square in F_p"
-assert legendre(d) == p - 1, "d is not a square in F_p"
-assert (1 + d) % p != 0, "needed by claim 1 (d != -1)"
+section("1/5  Field facts needed by the completeness theorem")
+with step("p = 1 mod 4, so -1 is a square"):
+    assert p % 4 == 1
+with step("a = -1 is a square in F_p"):
+    assert legendre(p - 1) == 1
+with step("d is not a square in F_p"):
+    assert legendre(d) == p - 1
+with step("1 + d != 0 (claim 1 needs d != -1)"):
+    assert (1 + d) % p != 0
 # Decoding never divides by zero: d y^2 + 1 == 0 would need y^2 = -1/d,
 # and -1/d is a non-square (square / non-square).
-assert legendre((-pow(d, -1, p)) % p) == p - 1
-print("1. field facts: p = 1 mod 4, a = -1 square, d non-square, 1+d != 0  OK")
+with step("decoding never divides by zero: -1/d is a non-square"):
+    assert legendre((-pow(d, -1, p)) % p) == p - 1
 
 
 # --------------------------------------------------------------------
@@ -152,25 +284,30 @@ Bx = sqrt_mod_p((By * By - 1) * pow(d * By * By + 1, -1, p))
 if Bx & 1:
     Bx = p - Bx
 B = (Bx, By)
-assert on_curve(B)
-assert aff_mul(L, B) == IDENTITY
+section("Affine reference implementation: setup")
+with step("base point B = (x, 4/5) is on the curve"):
+    assert on_curve(B)
+with step("[L]B == identity (affine ladder, one inversion per add)"):
+    assert aff_mul(L, B) == IDENTITY
 
 # The 8-torsion subgroup E[8].  A random point times L has order
 # dividing 8; pick one of order exactly 8 and take its multiples.
-while True:
-    # [k]B is in the prime-order subgroup, so push it out with a random
-    # x-coordinate instead: pick random y, solve for x, multiply by L.
-    y = random.randrange(p)
-    x = sqrt_mod_p((y * y - 1) * pow(d * y * y + 1, -1, p))
-    if x is None:
-        continue
-    T8 = aff_mul(L, (x, y))
-    if aff_mul(4, T8) != IDENTITY:        # order exactly 8
-        break
-TORSION = [aff_mul(i, T8) for i in range(8)]
-assert len(set(TORSION)) == 8
-assert all(on_curve(T) and aff_mul(8, T) == IDENTITY for T in TORSION)
-assert TORSION[0] == IDENTITY
+with step("find a point of order 8: random on-curve (x, y) times L"):
+    while True:
+        # [k]B is in the prime-order subgroup, so push it out with a random
+        # x-coordinate instead: pick random y, solve for x, multiply by L.
+        y = random.randrange(p)
+        x = sqrt_mod_p((y * y - 1) * pow(d * y * y + 1, -1, p))
+        if x is None:
+            continue
+        T8 = aff_mul(L, (x, y))
+        if aff_mul(4, T8) != IDENTITY:        # order exactly 8
+            break
+with step("E[8] = its 8 multiples: distinct, on the curve, killed by 8"):
+    TORSION = [aff_mul(i, T8) for i in range(8)]
+    assert len(set(TORSION)) == 8
+    assert all(on_curve(T) and aff_mul(8, T) == IDENTITY for T in TORSION)
+    assert TORSION[0] == IDENTITY
 
 
 # --------------------------------------------------------------------
@@ -178,14 +315,17 @@ assert TORSION[0] == IDENTITY
 # --------------------------------------------------------------------
 # Put y = 1 in -x^2 + y^2 = 1 + d x^2 y^2  ->  (1 + d) x^2 = 0  ->  x = 0.
 # On any point with y == 1, x^2 = (y^2 - 1) / (d y^2 + 1) = 0 / (d+1) = 0.
-assert sqrt_mod_p(0) == 0
-assert (0 * pow(d + 1, -1, p)) % p == 0
+section("2/5  Claim 1: y == 1 only at the identity")
+with step("y = 1 gives x^2 = 0 / (d + 1) = 0, so x = 0"):
+    assert sqrt_mod_p(0) == 0
+    assert (0 * pow(d + 1, -1, p)) % p == 0
 # and the only such point is the identity, which the old check compared
 # against:  encode((0, 1)) == 01 00 00 ... 00
-assert aff_encode(IDENTITY) == bytes([1] + [0] * 31)
+with step("identity encodes as 01 00..00, the old check's reference"):
+    assert aff_encode(IDENTITY) == bytes([1] + [0] * 31)
 # Sanity on the small-order points: exactly one has y == 1.
-assert [T for T in TORSION if T[1] == 1] == [IDENTITY]
-print("2. claim 1: y == 1  =>  x == 0; only the identity, encoded 01 00..00  OK")
+with step("exactly one 8-torsion point has y == 1: the identity"):
+    assert [T for T in TORSION if T[1] == 1] == [IDENTITY]
 
 
 # --------------------------------------------------------------------
@@ -297,12 +437,15 @@ def test_pair(Pa, Qa):
 # P + (-P), order-2 and order-4 points.  These are exactly the inputs on
 # which incomplete formulas (e.g. Weierstrass, or Edwards with square d)
 # blow up, so they are the ones worth testing explicitly.
-for Pa in TORSION:
-    for Qa in TORSION:
-        test_pair(Pa, Qa)
+section("3/5  ge_add / ge_madd / ge_double are the complete HWCD formulas")
+_out("  each pair: result == affine law, Z3 != 0, T == XY/Z, on curve, and\n"
+     "  Z3 == 4 Z1^2 Z2^2 (1 +- d x1x2y1y2)  resp.  Z^4 (1 +- d x^2y^2)")
+for Pa, Qa in progress("all 64 ordered pairs of 8-torsion points",
+                       [(P, Q) for P in TORSION for Q in TORSION]):
+    test_pair(Pa, Qa)
 # Random points, with and without a torsion component, against
 # themselves, their negation, their torsion translates, and each other.
-for _ in range(50):
+for _ in progress("random P, Q: P+P, P-P, P+Q, P+-P+torsion (50 rounds x 19)", 50):
     Pa = aff_add(aff_mul(random.randrange(L), B), random.choice(TORSION))
     Qa = aff_add(aff_mul(random.randrange(L), B), random.choice(TORSION))
     test_pair(Pa, Pa)
@@ -311,11 +454,6 @@ for _ in range(50):
     for T in TORSION:
         test_pair(Pa, aff_add(Pa, T))
         test_pair(Pa, aff_add(aff_neg(Pa), T))
-print("3. ge_add/ge_madd/ge_double match the affine law, keep T = XY/Z,"
-      " and Z3 factors as\n   4 Z1^2 Z2^2 (1 +- d x1x2y1y2) resp."
-      " Z^4 (1 +- d x^2y^2), with every factor nonzero,\n"
-      "   on all 64 pairs of 8-torsion points, P+P, P-P, P+torsion,"
-      " random pairs  OK")
 
 
 # --------------------------------------------------------------------
@@ -339,20 +477,20 @@ def new_check(P):
     return 0 if Y % p == Z % p else -1
 
 
-for Pa in TORSION:
-    for _ in range(20):
-        P = to_proj(Pa)
-        assert old_check(P) == new_check(P) == (0 if Pa == IDENTITY else -1)
-for _ in range(200):
+section("4/5  old check (encode + compare) == new check (Y == Z)")
+with step("every 8-torsion point, 20 random projective representatives each"):
+    for Pa in TORSION:
+        for _ in range(20):
+            P = to_proj(Pa)
+            assert old_check(P) == new_check(P) == (0 if Pa == IDENTITY else -1)
+for _ in progress("random points with torsion component, random Z", 200):
     Pa = aff_add(aff_mul(random.randrange(L), B), random.choice(TORSION))
     P = to_proj(Pa)
     assert old_check(P) == new_check(P) == (0 if Pa == IDENTITY else -1)
 # The one representation where they would disagree, which claim 2 rules
 # out: Z == 0.
-assert old_check((0, 0, 0, 0)) == -1 and new_check((0, 0, 0, 0)) == 0
-print("4. old_check == new_check on every small-order point and random"
-      " points (random Z);\n   they differ only at Z == 0, which 3. rules"
-      " out  OK")
+with step("they differ only at Z == 0 (old rejects, new accepts), ruled out by 3"):
+    assert old_check((0, 0, 0, 0)) == -1 and new_check((0, 0, 0, 0)) == 0
 
 
 # --------------------------------------------------------------------
@@ -406,6 +544,8 @@ def le32(n):
 # These are the "bogus" signatures Zebra and Monocypher both accept
 # (small-order keys, small-order R, non-canonical encodings), and the
 # inputs where every intermediate point carries a torsion component.
+section("5/5  Vectors for the differential C harness")
+pr = progress("cofactored accepts: k x r x h x TA (x 8 TR x encodings)", 4 * 2 * 4 * 8)
 for k in (0, 1, random.randrange(L), random.randrange(L)):
     kB = aff_mul(k, B)
     for r in (0, random.randrange(L)):
@@ -422,24 +562,28 @@ for k in (0, 1, random.randrange(L), random.randrange(L)):
                     # same with s off by one: must reject
                     add_vec(aff_encode(R) + le32((s + 1) % L),
                             aff_encode(A), le32(h), -1)
+                pr.tick()
+pr.done()
 # s >= L: rejected before any point arithmetic
-add_vec(aff_encode(IDENTITY) + le32(L), aff_encode(IDENTITY), le32(0), -1)
-add_vec(aff_encode(IDENTITY) + le32(2**256 - 1), aff_encode(IDENTITY), le32(0), -1)
+with step("s >= L: rejected before any point arithmetic (2 cases)"):
+    add_vec(aff_encode(IDENTITY) + le32(L), aff_encode(IDENTITY), le32(0), -1)
+    add_vec(aff_encode(IDENTITY) + le32(2**256 - 1), aff_encode(IDENTITY), le32(0), -1)
 # off-curve encodings: rejected by ge_frombytes
-for _ in range(50):
+for _ in progress("random off-curve encodings, rejected by ge_frombytes", 50):
     pk = random.randbytes(32)
     sig = random.randbytes(32) + le32(random.randrange(L))
     add_vec(sig, pk, le32(random.randrange(L)))
 # random on-curve A, R with random s, h: rejects
-for _ in range(50):
+for _ in progress("random on-curve A, R with random s, h: rejects", 50):
     A = aff_add(aff_mul(random.randrange(L), B), random.choice(TORSION))
     R = aff_add(aff_mul(random.randrange(L), B), random.choice(TORSION))
     add_vec(aff_encode(R) + le32(random.randrange(L)), aff_encode(A),
             le32(random.randrange(L)), -1)
 
 n_acc = sum(1 for v in vectors if v[3] == 0)
-with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                       "pr299_vectors.h"), "w") as f:
+out_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "pr299_vectors.h")
+with step(f"write {os.path.relpath(out_path)}"), open(out_path, "w") as f:
     f.write("// Generated by verify_pr299.py.  Verdicts computed with an\n"
             "// independent affine implementation, not with Monocypher.\n"
             "// sig[64] (R || s), pk[32] (A), h[32], expected (0 ok, -1 ko)\n"
@@ -451,7 +595,7 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
             return "{" + ",".join(str(x) for x in b) + "}"
         f.write(f"{{{cl(sig)},{cl(pk)},{cl(h)},{e}}},\n")
     f.write("};\n")
-print(f"5. wrote pr299_vectors.h: {len(vectors)} cases"
-      f" ({n_acc} cofactored accepts incl. small-order and non-canonical"
-      f" A/R, {len(vectors) - n_acc} rejects)")
-print("all OK")
+_out(f"  {len(vectors)} cases: {n_acc} cofactored accepts (incl. small-order"
+     f" and non-canonical A/R), {len(vectors) - n_acc} rejects")
+
+_out(f"\n{_c('1;32', 'all OK')}  {_c('2', 'total ' + _fmt(time.monotonic() - _T0))}")

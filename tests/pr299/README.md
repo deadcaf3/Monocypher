@@ -52,7 +52,13 @@ compares `crypto_eddsa_check_equation` / `crypto_eddsa_check` verdicts on:
 
     sh tests/pr299/run.sh      # OLD=<ref> to compare against another revision
 
-Expected last line: `... 0 mismatches`.
+Expected last line: `all OK`.
+
+Both print every step before running it, with a progress counter for the
+long loops and the elapsed time when it finishes, so a run that looks
+stuck shows exactly where it is.  An assertion failure or Ctrl-C names
+the step it happened in.  Output is coloured on a terminal and plain
+when piped; set `NO_COLOR` to disable colour.
 
 The harness was mutation-tested: dropping the `- 1`, comparing `Y` to `X`
 instead of `Z`, and removing one of the three doublings are each caught

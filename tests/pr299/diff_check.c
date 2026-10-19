@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include "monocypher.h"
 #include "pr299_vectors.h"
 
@@ -46,6 +48,11 @@ static void rng_fill(uint8_t *buf, size_t n)
 
 static long checks = 0, accepts = 0;
 
+// Progress: a running counter on a terminal (overwritten in place), a
+// line every 10% when piped, so a stuck run shows where it is.
+static int    tty;
+static double t0;
+
 static void same_equation(const uint8_t sig[64], const uint8_t pk[32],
                           const uint8_t h[32], int expected, const char *what)
 {
@@ -54,6 +61,7 @@ static void same_equation(const uint8_t sig[64], const uint8_t pk[32],
 	checks++;
 	if (o == 0) { accepts++; }
 	if (o != n || (expected != 2 && o != expected)) {
+		if (tty) { printf("\r\033[K"); fflush(stdout); }
 		fprintf(stderr, "MISMATCH (%s): old %d, new %d, expected %d\n",
 		        what, o, n, expected);
 		exit(1);
@@ -69,26 +77,58 @@ static void same_check(const uint8_t sig[64], const uint8_t pk[32],
 	checks++;
 	if (o == 0) { accepts++; }
 	if (o != n || (expected != 2 && o != expected)) {
+		if (tty) { printf("\r\033[K"); fflush(stdout); }
 		fprintf(stderr, "MISMATCH (%s): old %d, new %d, expected %d\n",
 		        what, o, n, expected);
 		exit(1);
 	}
 }
 
+static double now(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
+
+static void progress(const char *label, long i, long n)
+{
+	static double last;
+	if (tty) {
+		if (now() - last < 0.1 && i != 0) { return; }
+		last = now();
+		printf("\r\033[K  ... %-10s %7ld/%ld  %.1fs", label, i, n, now() - t0);
+	} else if (i % (n / 10 > 0 ? n / 10 : 1) == 0) {
+		printf("  ... %-10s %7ld/%ld  %.1fs\n", label, i, n, now() - t0);
+	}
+	fflush(stdout);
+}
+
+static void done(void)
+{
+	if (tty) { printf("\r\033[K"); }
+	printf("  ok  ");
+}
+
 int main(void)
 {
+	tty = isatty(1);
+	t0  = now();
 	// 1. Independently generated vectors (expected verdict included)
 	size_t nv = sizeof(pr299_vectors) / sizeof(pr299_vectors[0]);
 	for (size_t i = 0; i < nv; i++) {
 		const pr299_vec *v = &pr299_vectors[i];
+		progress("vectors", (long)i, (long)nv);
 		same_equation(v->sig, v->pk, v->h, v->expected, "python vector");
 	}
+	done();
 	printf("vectors:   %zu cases, old == new == reference\n", nv);
 
 	// 2. Real signatures, and every small corruption of them
 	long before = checks;
 	for (int i = 0; i < 200; i++) {
 		uint8_t seed[32], seed2[32], sk[64], pk[32], sig[64], msg[64];
+		progress("signatures", i, 200);
 		rng_fill(seed, 32);
 		memcpy(seed2, seed, 32);            // key_pair wipes the seed
 		rng_fill(msg, sizeof msg);
@@ -123,13 +163,15 @@ int main(void)
 			same_check(sig, pk, msg, len, -1, "message tampered");
 		}
 	}
-	printf("mutations: %ld cases, old == new\n", checks - before);
+	done();
+	printf("mutations: %ld cases, old == new (200 signatures)\n", checks - before);
 
 	// 3. Random garbage straight into check_equation (h reduced mod L,
 	//    as crypto_eddsa_check does before calling it)
 	before = checks;
 	for (int i = 0; i < 20000; i++) {
 		uint8_t sig[64], pk[32], h64[64], h[32];
+		progress("random", i, 20000);
 		rng_fill(sig, 64); rng_fill(pk, 32); rng_fill(h64, 64);
 		crypto_eddsa_reduce(h, h64);
 		if (rng64() & 1) {         // sometimes a plausible pk and R
@@ -142,9 +184,10 @@ int main(void)
 		if (rng64() & 1) { sig[63] &= 0x0f; }   // sometimes s < L
 		same_equation(sig, pk, h, 2, "random");
 	}
+	done();
 	printf("random:    %ld cases, old == new\n", checks - before);
 
-	printf("total:     %ld checks, %ld accepted by both, 0 mismatches\n",
-	       checks, accepts);
+	printf("  ok  total:     %ld checks, %ld accepted by both, 0 mismatches"
+	       "  (%.1fs)\n", checks, accepts, now() - t0);
 	return 0;
 }
