@@ -41,6 +41,7 @@ to the exact formulas in monocypher.c.  This script
      cases for the differential C harness, with the verdict computed
      here, independently of either C implementation.
 """
+import functools
 import os
 import random
 import sys
@@ -235,8 +236,11 @@ def aff_add(P, Q):
     x1, y1 = P
     x2, y2 = Q
     k = d * x1 * x2 * y1 * y2 % p
-    x3 = (x1 * y2 + y1 * x2) * pow(1 + k, -1, p) % p
-    y3 = (y1 * y2 + x1 * x2) * pow(1 - k, -1, p) % p   # a = -1: y1y2 - a x1x2
+    # One inversion serves both denominators: 1/(1+k) = (1-k)/((1+k)(1-k)).
+    # (1+k)(1-k) != 0 by completeness; pow() raises ValueError otherwise.
+    inv = pow((1 + k) * (1 - k), -1, p)
+    x3 = (x1 * y2 + y1 * x2) * (1 - k) * inv % p
+    y3 = (y1 * y2 + x1 * x2) * (1 + k) * inv % p   # a = -1: y1y2 - a x1x2
     return (x3, y3)
 
 
@@ -244,7 +248,7 @@ def aff_neg(P):
     return ((-P[0]) % p, P[1])
 
 
-def aff_mul(k, P):
+def aff_mul_ladder(k, P):
     R = IDENTITY
     while k:
         if k & 1:
@@ -254,12 +258,29 @@ def aff_mul(k, P):
     return R
 
 
+B_WINDOWS = []   # B_WINDOWS[i][j] = [j * 16^i]B, filled in once B is known
+
+
+@functools.lru_cache(maxsize=None)
+def aff_mul(k, P):
+    """[k]P.  Fixed-base 4-bit windows for B (64 adds instead of ~380),
+    double-and-add otherwise.  Memoised: section 5 reuses the same [s]B
+    and [h]A across thousands of vectors."""
+    if B_WINDOWS and P == B_WINDOWS[0][1]:
+        R = IDENTITY
+        for i, row in enumerate(B_WINDOWS):
+            R = aff_add(R, row[(k >> (4 * i)) & 15])
+        return R
+    return aff_mul_ladder(k, P)
+
+
 def aff_encode(P):
     """RFC 8032 encoding: y, with sign(x) in the top bit."""
     x, y = P
     return (y | ((x & 1) << 255)).to_bytes(32, "little")
 
 
+@functools.lru_cache(maxsize=None)
 def mc_decode(s):
     """Monocypher's ge_frombytes_neg_vartime, un-negated, as a Python
     function: returns the point or None.  Mirrors the C exactly:
@@ -287,8 +308,20 @@ B = (Bx, By)
 section("Affine reference implementation: setup")
 with step("base point B = (x, 4/5) is on the curve"):
     assert on_curve(B)
-with step("[L]B == identity (affine ladder, one inversion per add)"):
+with step("[L]B == identity (affine double-and-add ladder)"):
+    assert aff_mul_ladder(L, B) == IDENTITY
+with step("fixed-base table: [j 16^i]B for 64 windows, checked against the ladder"):
+    base = B
+    for i in range(64):
+        row = [IDENTITY]
+        for j in range(1, 16):
+            row.append(aff_add(row[-1], base))
+        B_WINDOWS.append(row)
+        for _ in range(4):
+            base = aff_add(base, base)
     assert aff_mul(L, B) == IDENTITY
+    for k in (1, 2, 15, 16, 17, L - 1, random.randrange(L)):
+        assert aff_mul(k, B) == aff_mul_ladder(k, B)
 
 # The 8-torsion subgroup E[8].  A random point times L has order
 # dividing 8; pick one of order exactly 8 and take its multiples.

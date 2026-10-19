@@ -15,7 +15,7 @@ point `P = [8]([s]B - [h]A - R)`, and they agree exactly when
 Two independent things to run, from the root of this checkout (the branch
 contains the PR change plus this directory):
 
-## `verify_pr299.py`  (pure Python, no deps, ~1.5 min)
+## `verify_pr299.py`  (pure Python, no deps, ~5 s)
 
 An affine Edwards implementation written from the curve equation.  It
 
@@ -39,18 +39,19 @@ An affine Edwards implementation written from the curve equation.  It
 
     python3 tests/pr299/verify_pr299.py
 
-## `run.sh` + `diff_check.c`  (~40 s)
+## `run.sh` + `diff_check.c`  (~15 s)
 
 Builds `master`'s `monocypher.c` with every public symbol renamed
 `old_crypto_*`, links it with the working tree's `monocypher.c`, and
 compares `crypto_eddsa_check_equation` / `crypto_eddsa_check` verdicts on:
 
 - the 5494 Python vectors (old == new == Python);
-- 200 fresh signatures, every single-byte and single-bit corruption of
-  each signature and public key (173k cases), tampered messages;
-- 20k random inputs, half with on-curve `A` and `R`.
+- 16 fresh signatures, every single-byte and single-bit corruption of
+  each signature and public key (14k cases), tampered messages;
+- 5k random inputs, half with on-curve `A` and `R`.
 
-    sh tests/pr299/run.sh      # OLD=<ref> to compare against another revision
+    sh tests/pr299/run.sh                   # OLD=<ref>: other base revision
+    SIGS=200 RANDOM=20000 sh tests/pr299/run.sh   # long run, ~1 min
 
 Expected last line: `all OK`.
 

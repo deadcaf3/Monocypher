@@ -110,10 +110,20 @@ static void done(void)
 	printf("  ok  ");
 }
 
+static long env_long(const char *name, long dflt)
+{
+	const char *v = getenv(name);
+	return v && *v ? atol(v) : dflt;
+}
+
 int main(void)
 {
 	tty = isatty(1);
 	t0  = now();
+	// SIGS=200 RANDOM=20000 for the long run; every byte and bit position
+	// of sig and pk is corrupted once per signature either way.
+	long n_sigs   = env_long("SIGS",   16);
+	long n_random = env_long("RANDOM", 5000);
 	// 1. Independently generated vectors (expected verdict included)
 	size_t nv = sizeof(pr299_vectors) / sizeof(pr299_vectors[0]);
 	for (size_t i = 0; i < nv; i++) {
@@ -126,9 +136,9 @@ int main(void)
 
 	// 2. Real signatures, and every small corruption of them
 	long before = checks;
-	for (int i = 0; i < 200; i++) {
+	for (long i = 0; i < n_sigs; i++) {
 		uint8_t seed[32], seed2[32], sk[64], pk[32], sig[64], msg[64];
-		progress("signatures", i, 200);
+		progress("signatures", i, n_sigs);
 		rng_fill(seed, 32);
 		memcpy(seed2, seed, 32);            // key_pair wipes the seed
 		rng_fill(msg, sizeof msg);
@@ -164,14 +174,15 @@ int main(void)
 		}
 	}
 	done();
-	printf("mutations: %ld cases, old == new (200 signatures)\n", checks - before);
+	printf("mutations: %ld cases, old == new (%ld signatures)\n",
+	       checks - before, n_sigs);
 
 	// 3. Random garbage straight into check_equation (h reduced mod L,
 	//    as crypto_eddsa_check does before calling it)
 	before = checks;
-	for (int i = 0; i < 20000; i++) {
+	for (long i = 0; i < n_random; i++) {
 		uint8_t sig[64], pk[32], h64[64], h[32];
-		progress("random", i, 20000);
+		progress("random", i, n_random);
 		rng_fill(sig, 64); rng_fill(pk, 32); rng_fill(h64, 64);
 		crypto_eddsa_reduce(h, h64);
 		if (rng64() & 1) {         // sometimes a plausible pk and R
