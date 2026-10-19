@@ -27,3 +27,4 @@ monocypher-*/
 doc/html/
 doc/man3/
 tests/vectors.h
+tests/pr299/pr299_vectors.h
